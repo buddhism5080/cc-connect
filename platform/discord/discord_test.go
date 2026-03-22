@@ -69,10 +69,11 @@ func TestResolveThreadReplyContext_UsesExistingThreadChannel(t *testing.T) {
 
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
-			ID:        "m1",
+			ID:        "msg-1",
 			ChannelID: "thread-1",
 			GuildID:   "guild-1",
-			Author:    &discordgo.User{ID: "u1", Username: "jun"},
+			Content:   "hello world",
+			Author:    &discordgo.User{Username: "alice"},
 		},
 	}
 
@@ -83,15 +84,54 @@ func TestResolveThreadReplyContext_UsesExistingThreadChannel(t *testing.T) {
 	if sessionKey != "discord:thread-1" {
 		t.Fatalf("sessionKey = %q, want discord:thread-1", sessionKey)
 	}
-	if rc.channelID != "thread-1" || rc.threadID != "thread-1" {
-		t.Fatalf("replyContext = %#v, want thread channel routing", rc)
+	if rc.channelID != "thread-1" || rc.threadID != "thread-1" || rc.messageID != "msg-1" {
+		t.Fatalf("replyContext = %#v, want thread reply context", rc)
 	}
 	if joinedThread != "thread-1" {
 		t.Fatalf("joinedThread = %q, want thread-1", joinedThread)
 	}
 }
 
-func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
+func TestResolveThreadReplyContext_UsesAttachedThread(t *testing.T) {
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+	}
+
+	joinedThread := ""
+	ops.joinThread = func(threadID string) error {
+		joinedThread = threadID
+		return nil
+	}
+
+	msg := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-1",
+			ChannelID: "channel-1",
+			GuildID:   "guild-1",
+			Content:   "hello world",
+			Author:    &discordgo.User{Username: "alice"},
+			Thread:    &discordgo.Channel{ID: "thread-attached"},
+		},
+	}
+
+	sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
+	if err != nil {
+		t.Fatalf("resolveThreadReplyContext() error = %v", err)
+	}
+	if sessionKey != "discord:thread-attached" {
+		t.Fatalf("sessionKey = %q, want discord:thread-attached", sessionKey)
+	}
+	if rc.channelID != "thread-attached" || rc.threadID != "thread-attached" {
+		t.Fatalf("replyContext = %#v, want attached thread context", rc)
+	}
+	if joinedThread != "thread-attached" {
+		t.Fatalf("joinedThread = %q, want thread-attached", joinedThread)
+	}
+}
+
+func TestResolveThreadReplyContext_StartsNewThread(t *testing.T) {
 	ops := fakeThreadOps{
 		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
 			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
@@ -99,19 +139,19 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 	}
 
 	var (
-		startChannelID string
-		startMessageID string
-		startName      string
-		joinedThread   string
+		startedChannelID string
+		startedMessageID string
+		startedName      string
+		joinedThread     string
 	)
 	ops.startThread = func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
-		startChannelID = channelID
-		startMessageID = messageID
-		startName = name
+		startedChannelID = channelID
+		startedMessageID = messageID
+		startedName = name
 		if archiveDuration != 1440 {
 			t.Fatalf("archiveDuration = %d, want 1440", archiveDuration)
 		}
-		return &discordgo.Channel{ID: "thread-99", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+		return &discordgo.Channel{ID: "thread-new", Type: discordgo.ChannelTypeGuildPublicThread}, nil
 	}
 	ops.joinThread = func(threadID string) error {
 		joinedThread = threadID
@@ -120,11 +160,11 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
-			ID:        "msg-42",
+			ID:        "msg-1",
 			ChannelID: "channel-1",
 			GuildID:   "guild-1",
-			Content:   "<@bot-1> investigate build failure",
-			Author:    &discordgo.User{ID: "u1", Username: "jun"},
+			Content:   "<@bot-1> summarize the repo",
+			Author:    &discordgo.User{Username: "alice"},
 		},
 	}
 
@@ -132,45 +172,23 @@ func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveThreadReplyContext() error = %v", err)
 	}
-	if sessionKey != "discord:thread-99" {
-		t.Fatalf("sessionKey = %q, want discord:thread-99", sessionKey)
+	if sessionKey != "discord:thread-new" {
+		t.Fatalf("sessionKey = %q, want discord:thread-new", sessionKey)
 	}
-	if rc.channelID != "thread-99" || rc.threadID != "thread-99" {
-		t.Fatalf("replyContext = %#v, want thread channel routing", rc)
+	if rc.channelID != "thread-new" || rc.threadID != "thread-new" || rc.messageID != "msg-1" {
+		t.Fatalf("replyContext = %#v, want new thread context", rc)
 	}
-	if startChannelID != "channel-1" || startMessageID != "msg-42" {
-		t.Fatalf("thread start args = (%q, %q), want (channel-1, msg-42)", startChannelID, startMessageID)
+	if startedChannelID != "channel-1" {
+		t.Fatalf("startedChannelID = %q, want channel-1", startedChannelID)
 	}
-	if startName != "investigate build failure" {
-		t.Fatalf("thread name = %q, want sanitized content", startName)
+	if startedMessageID != "msg-1" {
+		t.Fatalf("startedMessageID = %q, want msg-1", startedMessageID)
 	}
-	if joinedThread != "thread-99" {
-		t.Fatalf("joinedThread = %q, want thread-99", joinedThread)
+	if startedName != "summarize the repo" {
+		t.Fatalf("startedName = %q, want summarize the repo", startedName)
 	}
-}
-
-func TestSessionKeyForChannel_UsesThreadKeyWhenChannelIsThread(t *testing.T) {
-	ops := fakeThreadOps{
-		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
-			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildPrivateThread}, nil
-		},
-	}
-
-	if got := resolveSessionKeyForChannel("thread-7", "user-1", false, true, ops); got != "discord:thread-7" {
-		t.Fatalf("resolveSessionKeyForChannel() = %q, want discord:thread-7", got)
-	}
-}
-
-func TestReconstructReplyCtx_ThreadSessionKey(t *testing.T) {
-	p := &Platform{}
-
-	rctx, err := p.ReconstructReplyCtx("discord:thread-7")
-	if err != nil {
-		t.Fatalf("ReconstructReplyCtx() error = %v", err)
-	}
-	rc := rctx.(replyContext)
-	if rc.channelID != "thread-7" || rc.threadID != "thread-7" {
-		t.Fatalf("replyContext = %#v, want thread reply context", rc)
+	if joinedThread != "thread-new" {
+		t.Fatalf("joinedThread = %q, want thread-new", joinedThread)
 	}
 }
 
@@ -388,6 +406,76 @@ func TestSendWithButtons_PreservesMultipleRows(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("SendWithButtons() error = %v", err)
+	}
+}
+
+func TestSendPermissionButtons_SendsThreeButtonsInOneRow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload["content"] != "perm prompt" {
+			t.Fatalf("content = %#v, want perm prompt", payload["content"])
+		}
+		components, ok := payload["components"].([]any)
+		if !ok || len(components) != 1 {
+			t.Fatalf("components = %#v, want one row", payload["components"])
+		}
+		row, ok := components[0].(map[string]any)
+		if !ok {
+			t.Fatalf("row = %#v, want object", components[0])
+		}
+		rowComponents, ok := row["components"].([]any)
+		if !ok || len(rowComponents) != 3 {
+			t.Fatalf("row components = %#v, want 3 buttons", row["components"])
+		}
+		if rowComponents[0].(map[string]any)["custom_id"] != "perm:allow" {
+			t.Fatalf("button0 = %#v, want perm:allow", rowComponents[0])
+		}
+		if rowComponents[1].(map[string]any)["custom_id"] != "perm:deny" {
+			t.Fatalf("button1 = %#v, want perm:deny", rowComponents[1])
+		}
+		if rowComponents[2].(map[string]any)["custom_id"] != "perm:allow_all" {
+			t.Fatalf("button2 = %#v, want perm:allow_all", rowComponents[2])
+		}
+		if rowComponents[2].(map[string]any)["style"] != float64(discordgo.PrimaryButton) {
+			t.Fatalf("button2 style = %#v, want %d", rowComponents[2].(map[string]any)["style"], discordgo.PrimaryButton)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-1","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	err = p.SendPermissionButtons(context.Background(), replyContext{channelID: "ch-1", messageID: "orig-1"}, "perm prompt", [][]core.ButtonOption{{
+		{Text: "Allow", Data: "perm:allow"},
+		{Text: "Deny", Data: "perm:deny"},
+		{Text: "Allow All", Data: "perm:allow_all"},
+	}})
+	if err != nil {
+		t.Fatalf("SendPermissionButtons() error = %v", err)
 	}
 }
 

@@ -38,22 +38,29 @@ type interactionReplyCtx struct {
 	firstDone   bool
 }
 
+type permissionButtonReplyCtx struct {
+	channelID  string
+	messageID  string
+	replyToID  string
+	sessionKey string
+}
+
 type Platform struct {
-	token                      string
-	allowFrom                  string
-	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
-	groupReplyAll              bool
-	shareSessionInChannel      bool
-	threadIsolation            bool
-	respondToAtEveryoneAndHere bool
-	session                    *discordgo.Session
-	handler                    core.MessageHandler
-	botID                      string
-	appID                      string
-	channelNameCache           sync.Map // channelID -> name
-	botRoleIDs                 sync.Map // guildID -> bot managed role ID
-	readyCh                    chan struct{}
-	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
+	token                 string
+	allowFrom             string
+	guildID               string // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	groupReplyAll         bool
+	shareSessionInChannel bool
+	threadIsolation       bool
+	respondToAtEveryoneAndHere     bool
+	session               *discordgo.Session
+	handler               core.MessageHandler
+	botID                 string
+	appID                 string
+	channelNameCache      sync.Map // channelID -> name
+	botRoleIDs            sync.Map // guildID -> bot managed role ID
+	readyCh               chan struct{}
+	seenMsgs              sync.Map // message ID dedup: prevents duplicate MessageCreate events
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -69,14 +76,14 @@ func New(opts map[string]any) (core.Platform, error) {
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	return &Platform{
-		token:                      token,
-		allowFrom:                  allowFrom,
-		guildID:                    guildID,
-		groupReplyAll:              groupReplyAll,
-		shareSessionInChannel:      shareSessionInChannel,
-		readyCh:                    make(chan struct{}),
-		threadIsolation:            threadIsolation,
-		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
+		token:                 token,
+		allowFrom:             allowFrom,
+		guildID:               guildID,
+		groupReplyAll:         groupReplyAll,
+		shareSessionInChannel: shareSessionInChannel,
+		readyCh:               make(chan struct{}),
+		threadIsolation:       threadIsolation,
+		respondToAtEveryoneAndHere:     respondToAtEveryoneAndHere,
 	}, nil
 }
 
@@ -112,7 +119,6 @@ func (rc replyContext) useThreadChannel() bool {
 type discordThreadOps interface {
 	ResolveChannel(channelID string) (*discordgo.Channel, error)
 	StartThread(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
-	StartStandaloneThread(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
 	JoinThread(threadID string) error
 }
 
@@ -135,13 +141,6 @@ func (o sessionThreadOps) StartThread(channelID, messageID, name string, archive
 		return nil, fmt.Errorf("discord: session not initialized")
 	}
 	return o.session.MessageThreadStart(channelID, messageID, name, archiveDuration)
-}
-
-func (o sessionThreadOps) StartStandaloneThread(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
-	if o.session == nil {
-		return nil, fmt.Errorf("discord: session not initialized")
-	}
-	return o.session.ThreadStart(channelID, name, typ, archiveDuration)
 }
 
 func (o sessionThreadOps) JoinThread(threadID string) error {
@@ -180,33 +179,6 @@ func threadNameForMessage(m *discordgo.MessageCreate, botID string) string {
 		name = "cc session"
 	}
 	return truncateDiscordThreadName(name, 90)
-}
-
-func freshThreadName(title string) string {
-	name := strings.Join(strings.Fields(strings.ReplaceAll(title, "\n", " ")), " ")
-	if name == "" {
-		name = "cc cron"
-	}
-	return truncateDiscordThreadName(name, 90)
-}
-
-func standaloneThreadType(parentType discordgo.ChannelType) (discordgo.ChannelType, bool) {
-	switch parentType {
-	case discordgo.ChannelTypeGuildText:
-		return discordgo.ChannelTypeGuildPublicThread, true
-	case discordgo.ChannelTypeGuildNews:
-		return discordgo.ChannelTypeGuildNewsThread, true
-	default:
-		return 0, false
-	}
-}
-
-func parseDiscordSessionKeyChannelID(sessionKey string) (string, error) {
-	parts := strings.SplitN(sessionKey, ":", 3)
-	if len(parts) < 2 || parts[0] != "discord" || parts[1] == "" {
-		return "", fmt.Errorf("discord: invalid session key %q", sessionKey)
-	}
-	return parts[1], nil
 }
 
 func resolveSessionKeyForChannel(channelID, userID string, shareSessionInChannel bool, threadIsolation bool, ops discordThreadOps) string {
@@ -261,47 +233,6 @@ func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops dis
 		slog.Debug("discord: join new thread failed", "thread", thread.ID, "error", err)
 	}
 	rc := replyContext{channelID: thread.ID, messageID: m.ID, threadID: thread.ID}
-	return buildThreadSessionKey(thread.ID), rc, nil
-}
-
-func resolveCronReplyTarget(sessionKey, title string, ops discordThreadOps) (string, replyContext, error) {
-	channelID, err := parseDiscordSessionKeyChannelID(sessionKey)
-	if err != nil {
-		return "", replyContext{}, err
-	}
-
-	ch, err := ops.ResolveChannel(channelID)
-	if err != nil {
-		return "", replyContext{}, fmt.Errorf("resolve channel %s: %w", channelID, err)
-	}
-	parentChannelID := channelID
-	parentType := ch.Type
-	if isThreadChannelType(ch.Type) {
-		if ch.ParentID == "" {
-			return "", replyContext{}, core.ErrNotSupported
-		}
-		parent, err := ops.ResolveChannel(ch.ParentID)
-		if err != nil {
-			return "", replyContext{}, fmt.Errorf("resolve parent channel %s: %w", ch.ParentID, err)
-		}
-		parentChannelID = ch.ParentID
-		parentType = parent.Type
-	}
-
-	threadType, ok := standaloneThreadType(parentType)
-	if !ok {
-		return "", replyContext{}, core.ErrNotSupported
-	}
-
-	thread, err := ops.StartStandaloneThread(parentChannelID, freshThreadName(title), threadType, 1440)
-	if err != nil {
-		return "", replyContext{}, fmt.Errorf("start thread in channel %s: %w", parentChannelID, err)
-	}
-	if err := ops.JoinThread(thread.ID); err != nil {
-		slog.Debug("discord: join fresh thread failed", "thread", thread.ID, "error", err)
-	}
-
-	rc := replyContext{channelID: thread.ID, threadID: thread.ID}
 	return buildThreadSessionKey(thread.ID), rc, nil
 }
 
@@ -496,7 +427,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
 			ChatName: p.resolveChannelName(m.ChannelID),
-			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content: m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
 		}
 		p.handler(p, msg)
 	})
@@ -581,7 +512,7 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 		MessageID: i.ID,
 		UserID:    userID, UserName: userName,
 		ChatName: p.resolveChannelName(channelID),
-		Content:  cmdText, ReplyCtx: rctx,
+		Content:   cmdText, ReplyCtx: rctx,
 	}
 	p.handler(p, msg)
 }
@@ -620,38 +551,91 @@ func reconstructCommand(data discordgo.ApplicationCommandInteractionData) string
 
 func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, userID, userName string) {
 	data := i.MessageComponentData()
-	if !strings.HasPrefix(data.CustomID, "cmd:") {
-		slog.Debug("discord: unknown component interaction", "custom_id", data.CustomID)
+	customID := data.CustomID
+	if !strings.HasPrefix(customID, "cmd:") && !strings.HasPrefix(customID, "perm:") {
+		slog.Debug("discord: unknown component interaction", "custom_id", customID)
 		return
 	}
 
-	command := strings.TrimPrefix(data.CustomID, "cmd:")
+	channelID := i.ChannelID
 	origText := ""
-	if i.Message != nil {
+	if i.Message != nil && i.Message.Content != "" {
 		origText = i.Message.Content
 	}
 	emptyComponents := []discordgo.MessageComponent{}
+
+	if strings.HasPrefix(customID, "cmd:") {
+		command := strings.TrimPrefix(customID, "cmd:")
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content:    origText + "\n\n> " + command,
+				Components: emptyComponents,
+			},
+		}); err != nil {
+			slog.Debug("discord: command component update failed", "error", err)
+		}
+
+		sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "discord",
+			MessageID:  i.ID,
+			UserID:     userID,
+			UserName:   userName,
+			ChatName:   p.resolveChannelName(channelID),
+			Content:    command,
+			ReplyCtx:   replyContext{channelID: channelID},
+		})
+		return
+	}
+
+	var responseText, choiceLabel string
+	switch customID {
+	case "perm:allow":
+		responseText = "allow"
+		choiceLabel = "✅ Allowed"
+	case "perm:deny":
+		responseText = "deny"
+		choiceLabel = "❌ Denied"
+	case "perm:allow_all":
+		responseText = "allow all"
+		choiceLabel = "✅ Allow All"
+	default:
+		return
+	}
+	if origText == "" {
+		origText = "(permission request)"
+	}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
-			Content:    origText + "\n\n> " + command,
+			Content:    origText + "\n\n" + choiceLabel,
 			Components: emptyComponents,
 		},
 	}); err != nil {
-		slog.Debug("discord: command component update failed", "error", err)
+		slog.Debug("discord: permission component update failed", "error", err)
 	}
 
-	channelID := i.ChannelID
-	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+	messageID := ""
+	if i.Message != nil {
+		messageID = i.Message.ID
+	}
+	rctx := permissionButtonReplyCtx{
+		channelID:  channelID,
+		messageID:  messageID,
+		replyToID:  messageID,
+		sessionKey: resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session}),
+	}
 	p.handler(p, &core.Message{
-		SessionKey: sessionKey,
+		SessionKey: rctx.sessionKey,
 		Platform:   "discord",
 		MessageID:  i.ID,
 		UserID:     userID,
 		UserName:   userName,
 		ChatName:   p.resolveChannelName(channelID),
-		Content:    command,
-		ReplyCtx:   replyContext{channelID: channelID},
+		Content:    responseText,
+		ReplyCtx:   rctx,
 	})
 }
 
@@ -659,6 +643,8 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
 		return p.sendInteraction(rc, content)
+	case permissionButtonReplyCtx:
+		return p.sendPermissionReply(rc, content)
 	case replyContext:
 		return p.sendChannelReply(rc, content)
 	default:
@@ -671,6 +657,8 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
 		return p.sendInteraction(rc, content)
+	case permissionButtonReplyCtx:
+		return p.sendPermissionReply(rc, content)
 	case replyContext:
 		return p.sendChannel(rc, content)
 	default:
@@ -734,6 +722,22 @@ func (p *Platform) sendChannel(rc replyContext, content string) error {
 		if err != nil {
 			return fmt.Errorf("discord: send: %w", err)
 		}
+	}
+	return nil
+}
+
+func (p *Platform) sendPermissionReply(rc permissionButtonReplyCtx, content string) error {
+	if rc.replyToID == "" {
+		_, err := p.session.ChannelMessageSend(rc.channelID, content)
+		if err != nil {
+			return fmt.Errorf("discord: send permission followup: %w", err)
+		}
+		return nil
+	}
+	ref := &discordgo.MessageReference{MessageID: rc.replyToID}
+	_, err := p.session.ChannelMessageSendReply(rc.channelID, content, ref)
+	if err != nil {
+		return fmt.Errorf("discord: send permission reply: %w", err)
 	}
 	return nil
 }
@@ -849,8 +853,35 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	return nil
 }
 
+func (p *Platform) SendPermissionButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return core.ErrNotSupported
+	}
+	if len(buttons) == 0 {
+		return fmt.Errorf("discord: no permission buttons provided")
+	}
+	components := buildDiscordActionRows(buttons)
+	if len(components) == 0 {
+		return fmt.Errorf("discord: no permission buttons provided")
+	}
+	msg := &discordgo.MessageSend{
+		Content:    content,
+		Components: components,
+	}
+	if rc.messageID != "" {
+		msg.Reference = &discordgo.MessageReference{MessageID: rc.messageID}
+	}
+	_, err := p.session.ChannelMessageSendComplex(rc.channelID, msg)
+	if err != nil {
+		return fmt.Errorf("discord: send permission buttons: %w", err)
+	}
+	return nil
+}
+
 var _ core.ImageSender = (*Platform)(nil)
 var _ core.InlineButtonSender = (*Platform)(nil)
+var _ core.PermissionButtonSender = (*Platform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// discord:{channelID}:{userID} or discord:{threadID}
@@ -863,17 +894,6 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		rc.threadID = parts[1]
 	}
 	return rc, nil
-}
-
-func (p *Platform) ResolveCronReplyTarget(sessionKey string, title string) (string, any, error) {
-	if !p.threadIsolation {
-		return "", nil, core.ErrNotSupported
-	}
-	resolvedSessionKey, rc, err := resolveCronReplyTarget(sessionKey, title, sessionThreadOps{session: p.session})
-	if err != nil {
-		return "", nil, err
-	}
-	return resolvedSessionKey, rc, nil
 }
 
 // discordPreviewHandle stores the IDs needed to edit or delete a preview message.
@@ -1115,3 +1135,4 @@ func downloadURL(u string) ([]byte, error) {
 	}
 	return io.ReadAll(resp.Body)
 }
+
