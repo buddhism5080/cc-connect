@@ -521,62 +521,94 @@ func reconstructCommand(data discordgo.ApplicationCommandInteractionData) string
 
 func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, userID, userName string) {
 	data := i.MessageComponentData()
-	if !strings.HasPrefix(data.CustomID, "perm:") {
-		slog.Debug("discord: unknown component interaction", "custom_id", data.CustomID)
+	if strings.HasPrefix(data.CustomID, "perm:") {
+		var responseText, choiceLabel string
+		switch data.CustomID {
+		case "perm:allow":
+			responseText = "allow"
+			choiceLabel = "✅ Allowed"
+		case "perm:deny":
+			responseText = "deny"
+			choiceLabel = "❌ Denied"
+		case "perm:allow_all":
+			responseText = "allow all"
+			choiceLabel = "✅ Allow All"
+		default:
+			return
+		}
+
+		origText := "(permission request)"
+		if i.Message != nil && i.Message.Content != "" {
+			origText = i.Message.Content
+		}
+		emptyComponents := []discordgo.MessageComponent{}
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content:    origText + "\n\n" + choiceLabel,
+				Components: emptyComponents,
+			},
+		}); err != nil {
+			slog.Debug("discord: permission component update failed", "error", err)
+		}
+
+		channelID := i.ChannelID
+		messageID := ""
+		if i.Message != nil {
+			messageID = i.Message.ID
+		}
+		rctx := permissionButtonReplyCtx{
+			channelID:  channelID,
+			messageID:  messageID,
+			replyToID:  messageID,
+			sessionKey: resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session}),
+		}
+		p.handler(p, &core.Message{
+			SessionKey: rctx.sessionKey,
+			Platform:   "discord",
+			MessageID:  i.ID,
+			UserID:     userID,
+			UserName:   userName,
+			ChatName:   p.resolveChannelName(channelID),
+			Content:    responseText,
+			ReplyCtx:   rctx,
+		})
 		return
 	}
 
-	var responseText, choiceLabel string
-	switch data.CustomID {
-	case "perm:allow":
-		responseText = "allow"
-		choiceLabel = "✅ Allowed"
-	case "perm:deny":
-		responseText = "deny"
-		choiceLabel = "❌ Denied"
-	case "perm:allow_all":
-		responseText = "allow all"
-		choiceLabel = "✅ Allow All"
-	default:
+	if strings.HasPrefix(data.CustomID, "cmd:") {
+		command := strings.TrimPrefix(data.CustomID, "cmd:")
+		origText := ""
+		if i.Message != nil {
+			origText = i.Message.Content
+		}
+		emptyComponents := []discordgo.MessageComponent{}
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content:    origText + "\n\n> " + command,
+				Components: emptyComponents,
+			},
+		}); err != nil {
+			slog.Debug("discord: command component update failed", "error", err)
+		}
+
+		channelID := i.ChannelID
+		sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey,
+			Platform:   "discord",
+			MessageID:  i.ID,
+			UserID:     userID,
+			UserName:   userName,
+			ChatName:   p.resolveChannelName(channelID),
+			Content:    command,
+			ReplyCtx:   replyContext{channelID: channelID},
+		})
 		return
 	}
 
-	origText := "(permission request)"
-	if i.Message != nil && i.Message.Content != "" {
-		origText = i.Message.Content
-	}
-	emptyComponents := []discordgo.MessageComponent{}
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseUpdateMessage,
-		Data: &discordgo.InteractionResponseData{
-			Content:    origText + "\n\n" + choiceLabel,
-			Components: emptyComponents,
-		},
-	}); err != nil {
-		slog.Debug("discord: permission component update failed", "error", err)
-	}
-
-	channelID := i.ChannelID
-	messageID := ""
-	if i.Message != nil {
-		messageID = i.Message.ID
-	}
-	rctx := permissionButtonReplyCtx{
-		channelID:  channelID,
-		messageID:  messageID,
-		replyToID:  messageID,
-		sessionKey: resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session}),
-	}
-	p.handler(p, &core.Message{
-		SessionKey: rctx.sessionKey,
-		Platform:   "discord",
-		MessageID:  i.ID,
-		UserID:     userID,
-		UserName:   userName,
-		ChatName:   p.resolveChannelName(channelID),
-		Content:    responseText,
-		ReplyCtx:   rctx,
-	})
+	slog.Debug("discord: unknown component interaction", "custom_id", data.CustomID)
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -740,6 +772,59 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 }
 
+func buildDiscordActionRows(rows [][]core.ButtonOption) []discordgo.MessageComponent {
+	components := make([]discordgo.MessageComponent, 0, len(rows))
+	for _, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+		buttons := make([]discordgo.MessageComponent, 0, len(row))
+		for idx, btn := range row {
+			style := discordgo.SecondaryButton
+			switch idx {
+			case 0:
+				style = discordgo.SuccessButton
+			case 1:
+				style = discordgo.DangerButton
+			case 2:
+				style = discordgo.PrimaryButton
+			}
+			buttons = append(buttons, discordgo.Button{
+				Label:    btn.Text,
+				Style:    style,
+				CustomID: btn.Data,
+			})
+		}
+		components = append(components, discordgo.ActionsRow{Components: buttons})
+	}
+	return components
+}
+
+func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
+	rc, ok := rctx.(*interactionReplyCtx)
+	if !ok {
+		return core.ErrNotSupported
+	}
+	if len(buttons) == 0 {
+		return fmt.Errorf("discord: no buttons provided")
+	}
+	components := buildDiscordActionRows(buttons)
+	if len(components) == 0 {
+		return fmt.Errorf("discord: no buttons provided")
+	}
+	if err := p.sendInteraction(rc, content); err != nil {
+		return err
+	}
+	_, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+		Content:    content,
+		Components: components,
+	})
+	if err != nil {
+		return fmt.Errorf("discord: send button followup: %w", err)
+	}
+	return nil
+}
+
 func (p *Platform) SendPermissionButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -748,28 +833,13 @@ func (p *Platform) SendPermissionButtons(ctx context.Context, rctx any, content 
 	if len(buttons) == 0 {
 		return fmt.Errorf("discord: no permission buttons provided")
 	}
-	row := make([]discordgo.MessageComponent, 0, len(buttons[0]))
-	for idx, btn := range buttons[0] {
-		style := discordgo.SecondaryButton
-		switch idx {
-		case 0:
-			style = discordgo.SuccessButton
-		case 1:
-			style = discordgo.DangerButton
-		case 2:
-			style = discordgo.PrimaryButton
-		}
-		row = append(row, discordgo.Button{
-			Label:    btn.Text,
-			Style:    style,
-			CustomID: btn.Data,
-		})
+	components := buildDiscordActionRows(buttons)
+	if len(components) == 0 {
+		return fmt.Errorf("discord: no permission buttons provided")
 	}
 	msg := &discordgo.MessageSend{
-		Content: content,
-		Components: []discordgo.MessageComponent{
-			discordgo.ActionsRow{Components: row},
-		},
+		Content:    content,
+		Components: components,
 	}
 	if rc.messageID != "" {
 		msg.Reference = &discordgo.MessageReference{MessageID: rc.messageID}
@@ -782,6 +852,7 @@ func (p *Platform) SendPermissionButtons(ctx context.Context, rctx any, content 
 }
 
 var _ core.ImageSender = (*Platform)(nil)
+var _ core.InlineButtonSender = (*Platform)(nil)
 var _ core.PermissionButtonSender = (*Platform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
