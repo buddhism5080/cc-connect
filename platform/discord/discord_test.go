@@ -20,10 +20,9 @@ import (
 // ── Thread tests (upstream) ──────────────────────────────────
 
 type fakeThreadOps struct {
-	resolveChannel        func(channelID string) (*discordgo.Channel, error)
-	startThread           func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
-	startStandaloneThread func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
-	joinThread            func(threadID string) error
+	resolveChannel func(channelID string) (*discordgo.Channel, error)
+	startThread    func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
+	joinThread     func(threadID string) error
 }
 
 func (f fakeThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, error) {
@@ -38,13 +37,6 @@ func (f fakeThreadOps) StartThread(channelID, messageID, name string, archiveDur
 		return nil, nil
 	}
 	return f.startThread(channelID, messageID, name, archiveDuration)
-}
-
-func (f fakeThreadOps) StartStandaloneThread(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
-	if f.startStandaloneThread == nil {
-		return nil, nil
-	}
-	return f.startStandaloneThread(channelID, name, typ, archiveDuration)
 }
 
 func (f fakeThreadOps) JoinThread(threadID string) error {
