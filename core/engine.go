@@ -5733,8 +5733,9 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 	if ps, ok := p.(PermissionButtonSender); ok {
 		if err := ps.SendPermissionButtons(e.ctx, replyCtx, prompt, permissionButtons); err == nil {
 			return
+		} else {
+			slog.Warn("sendPermissionPrompt: permission buttons failed, falling back", "error", err)
 		}
-		slog.Warn("sendPermissionPrompt: permission buttons failed, falling back")
 	}
 
 	// Try inline buttons next (Telegram)
