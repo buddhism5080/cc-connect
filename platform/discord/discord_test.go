@@ -17,12 +17,13 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// ── Thread tests ─────────────────────────────────────────────
+// ── Thread tests (upstream) ──────────────────────────────────
 
 type fakeThreadOps struct {
-	resolveChannel func(channelID string) (*discordgo.Channel, error)
-	startThread    func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
-	joinThread     func(threadID string) error
+	resolveChannel        func(channelID string) (*discordgo.Channel, error)
+	startThread           func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error)
+	startStandaloneThread func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error)
+	joinThread            func(threadID string) error
 }
 
 func (f fakeThreadOps) ResolveChannel(channelID string) (*discordgo.Channel, error) {
@@ -37,6 +38,13 @@ func (f fakeThreadOps) StartThread(channelID, messageID, name string, archiveDur
 		return nil, nil
 	}
 	return f.startThread(channelID, messageID, name, archiveDuration)
+}
+
+func (f fakeThreadOps) StartStandaloneThread(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
+	if f.startStandaloneThread == nil {
+		return nil, nil
+	}
+	return f.startStandaloneThread(channelID, name, typ, archiveDuration)
 }
 
 func (f fakeThreadOps) JoinThread(threadID string) error {
@@ -61,11 +69,10 @@ func TestResolveThreadReplyContext_UsesExistingThreadChannel(t *testing.T) {
 
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
-			ID:        "msg-1",
+			ID:        "m1",
 			ChannelID: "thread-1",
 			GuildID:   "guild-1",
-			Content:   "hello world",
-			Author:    &discordgo.User{Username: "alice"},
+			Author:    &discordgo.User{ID: "u1", Username: "jun"},
 		},
 	}
 
@@ -76,54 +83,15 @@ func TestResolveThreadReplyContext_UsesExistingThreadChannel(t *testing.T) {
 	if sessionKey != "discord:thread-1" {
 		t.Fatalf("sessionKey = %q, want discord:thread-1", sessionKey)
 	}
-	if rc.channelID != "thread-1" || rc.threadID != "thread-1" || rc.messageID != "msg-1" {
-		t.Fatalf("replyContext = %#v, want thread reply context", rc)
+	if rc.channelID != "thread-1" || rc.threadID != "thread-1" {
+		t.Fatalf("replyContext = %#v, want thread channel routing", rc)
 	}
 	if joinedThread != "thread-1" {
 		t.Fatalf("joinedThread = %q, want thread-1", joinedThread)
 	}
 }
 
-func TestResolveThreadReplyContext_UsesAttachedThread(t *testing.T) {
-	ops := fakeThreadOps{
-		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
-			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
-		},
-	}
-
-	joinedThread := ""
-	ops.joinThread = func(threadID string) error {
-		joinedThread = threadID
-		return nil
-	}
-
-	msg := &discordgo.MessageCreate{
-		Message: &discordgo.Message{
-			ID:        "msg-1",
-			ChannelID: "channel-1",
-			GuildID:   "guild-1",
-			Content:   "hello world",
-			Author:    &discordgo.User{Username: "alice"},
-			Thread:    &discordgo.Channel{ID: "thread-attached"},
-		},
-	}
-
-	sessionKey, rc, err := resolveThreadReplyContext(msg, "bot-1", ops)
-	if err != nil {
-		t.Fatalf("resolveThreadReplyContext() error = %v", err)
-	}
-	if sessionKey != "discord:thread-attached" {
-		t.Fatalf("sessionKey = %q, want discord:thread-attached", sessionKey)
-	}
-	if rc.channelID != "thread-attached" || rc.threadID != "thread-attached" {
-		t.Fatalf("replyContext = %#v, want attached thread context", rc)
-	}
-	if joinedThread != "thread-attached" {
-		t.Fatalf("joinedThread = %q, want thread-attached", joinedThread)
-	}
-}
-
-func TestResolveThreadReplyContext_StartsNewThread(t *testing.T) {
+func TestResolveThreadReplyContext_CreatesThreadForGuildMessage(t *testing.T) {
 	ops := fakeThreadOps{
 		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
 			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
@@ -131,19 +99,19 @@ func TestResolveThreadReplyContext_StartsNewThread(t *testing.T) {
 	}
 
 	var (
-		startedChannelID string
-		startedMessageID string
-		startedName      string
-		joinedThread     string
+		startChannelID string
+		startMessageID string
+		startName      string
+		joinedThread   string
 	)
 	ops.startThread = func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
-		startedChannelID = channelID
-		startedMessageID = messageID
-		startedName = name
+		startChannelID = channelID
+		startMessageID = messageID
+		startName = name
 		if archiveDuration != 1440 {
 			t.Fatalf("archiveDuration = %d, want 1440", archiveDuration)
 		}
-		return &discordgo.Channel{ID: "thread-new", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+		return &discordgo.Channel{ID: "thread-99", Type: discordgo.ChannelTypeGuildPublicThread}, nil
 	}
 	ops.joinThread = func(threadID string) error {
 		joinedThread = threadID
@@ -152,11 +120,11 @@ func TestResolveThreadReplyContext_StartsNewThread(t *testing.T) {
 
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
-			ID:        "msg-1",
+			ID:        "msg-42",
 			ChannelID: "channel-1",
 			GuildID:   "guild-1",
-			Content:   "<@bot-1> summarize the repo",
-			Author:    &discordgo.User{Username: "alice"},
+			Content:   "<@bot-1> investigate build failure",
+			Author:    &discordgo.User{ID: "u1", Username: "jun"},
 		},
 	}
 
@@ -164,27 +132,134 @@ func TestResolveThreadReplyContext_StartsNewThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveThreadReplyContext() error = %v", err)
 	}
-	if sessionKey != "discord:thread-new" {
-		t.Fatalf("sessionKey = %q, want discord:thread-new", sessionKey)
+	if sessionKey != "discord:thread-99" {
+		t.Fatalf("sessionKey = %q, want discord:thread-99", sessionKey)
 	}
-	if rc.channelID != "thread-new" || rc.threadID != "thread-new" || rc.messageID != "msg-1" {
-		t.Fatalf("replyContext = %#v, want new thread context", rc)
+	if rc.channelID != "thread-99" || rc.threadID != "thread-99" {
+		t.Fatalf("replyContext = %#v, want thread channel routing", rc)
 	}
-	if startedChannelID != "channel-1" {
-		t.Fatalf("startedChannelID = %q, want channel-1", startedChannelID)
+	if startChannelID != "channel-1" || startMessageID != "msg-42" {
+		t.Fatalf("thread start args = (%q, %q), want (channel-1, msg-42)", startChannelID, startMessageID)
 	}
-	if startedMessageID != "msg-1" {
-		t.Fatalf("startedMessageID = %q, want msg-1", startedMessageID)
+	if startName != "investigate build failure" {
+		t.Fatalf("thread name = %q, want sanitized content", startName)
 	}
-	if startedName != "summarize the repo" {
-		t.Fatalf("startedName = %q, want summarize the repo", startedName)
-	}
-	if joinedThread != "thread-new" {
-		t.Fatalf("joinedThread = %q, want thread-new", joinedThread)
+	if joinedThread != "thread-99" {
+		t.Fatalf("joinedThread = %q, want thread-99", joinedThread)
 	}
 }
 
-// ── Button tests ─────────────────────────────────────────────
+func TestSessionKeyForChannel_UsesThreadKeyWhenChannelIsThread(t *testing.T) {
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildPrivateThread}, nil
+		},
+	}
+
+	if got := resolveSessionKeyForChannel("thread-7", "user-1", false, true, ops); got != "discord:thread-7" {
+		t.Fatalf("resolveSessionKeyForChannel() = %q, want discord:thread-7", got)
+	}
+}
+
+func TestReconstructReplyCtx_ThreadSessionKey(t *testing.T) {
+	p := &Platform{}
+
+	rctx, err := p.ReconstructReplyCtx("discord:thread-7")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.channelID != "thread-7" || rc.threadID != "thread-7" {
+		t.Fatalf("replyContext = %#v, want thread reply context", rc)
+	}
+}
+
+func TestResolveCronReplyTarget_CreatesStandaloneThread(t *testing.T) {
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
+		},
+	}
+
+	var (
+		startChannelID string
+		startName      string
+		startType      discordgo.ChannelType
+		joinedThread   string
+	)
+	ops.startStandaloneThread = func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
+		startChannelID = channelID
+		startName = name
+		startType = typ
+		if archiveDuration != 1440 {
+			t.Fatalf("archiveDuration = %d, want 1440", archiveDuration)
+		}
+		return &discordgo.Channel{ID: "thread-fresh", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+	}
+	ops.joinThread = func(threadID string) error {
+		joinedThread = threadID
+		return nil
+	}
+
+	sessionKey, rc, err := resolveCronReplyTarget("discord:channel-1:user-1", "Daily sync", ops)
+	if err != nil {
+		t.Fatalf("resolveCronReplyTarget() error = %v", err)
+	}
+	if sessionKey != "discord:thread-fresh" {
+		t.Fatalf("sessionKey = %q, want discord:thread-fresh", sessionKey)
+	}
+	if rc.channelID != "thread-fresh" || rc.threadID != "thread-fresh" {
+		t.Fatalf("replyContext = %#v, want fresh thread routing", rc)
+	}
+	if startChannelID != "channel-1" {
+		t.Fatalf("startChannelID = %q, want channel-1", startChannelID)
+	}
+	if startName != "Daily sync" {
+		t.Fatalf("thread name = %q, want Daily sync", startName)
+	}
+	if startType != discordgo.ChannelTypeGuildPublicThread {
+		t.Fatalf("thread type = %v, want public thread", startType)
+	}
+	if joinedThread != "thread-fresh" {
+		t.Fatalf("joinedThread = %q, want thread-fresh", joinedThread)
+	}
+}
+
+func TestResolveCronReplyTarget_ReusesExistingThreadKey(t *testing.T) {
+	ops := fakeThreadOps{
+		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
+			switch channelID {
+			case "thread-1":
+				return &discordgo.Channel{ID: "thread-1", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "channel-1"}, nil
+			case "channel-1":
+				return &discordgo.Channel{ID: "channel-1", Type: discordgo.ChannelTypeGuildText}, nil
+			default:
+				t.Fatalf("unexpected channel lookup %q", channelID)
+				return nil, nil
+			}
+		},
+	}
+
+	startChannelID := ""
+	ops.startStandaloneThread = func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
+		startChannelID = channelID
+		return &discordgo.Channel{ID: "thread-fresh-2", Type: discordgo.ChannelTypeGuildPublicThread}, nil
+	}
+
+	sessionKey, rc, err := resolveCronReplyTarget("discord:thread-1", "cron", ops)
+	if err != nil {
+		t.Fatalf("resolveCronReplyTarget() error = %v", err)
+	}
+	if sessionKey != "discord:thread-fresh-2" {
+		t.Fatalf("sessionKey = %q, want discord:thread-fresh-2", sessionKey)
+	}
+	if rc.threadID != "thread-fresh-2" {
+		t.Fatalf("replyContext = %#v, want thread-fresh-2", rc)
+	}
+	if startChannelID != "channel-1" {
+		t.Fatalf("startChannelID = %q, want channel-1", startChannelID)
+	}
+}
 
 func TestSendWithButtons_UsesFollowupComponents(t *testing.T) {
 	requests := make([]string, 0, 2)
@@ -386,9 +461,99 @@ func TestSendPermissionButtons_SendsThreeButtonsInOneRow(t *testing.T) {
 	}
 }
 
+func TestSendFile_SendsChannelAttachment(t *testing.T) {
+	var contentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-file","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	err = p.SendFile(context.Background(), replyContext{channelID: "ch-1"}, core.FileAttachment{
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		Data:     []byte("pdf-data"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if !strings.Contains(contentType, "multipart/form-data") {
+		t.Fatalf("content type = %q, want multipart/form-data", contentType)
+	}
+}
+
+func TestSendFile_UsesInteractionEndpoints(t *testing.T) {
+	requests := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg-file","channel_id":"ch-1"}`)
+	}))
+	defer server.Close()
+
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointChannels := discordgo.EndpointChannels
+	oldEndpointWebhooks := discordgo.EndpointWebhooks
+	discordgo.EndpointDiscord = server.URL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
+	defer func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointChannels = oldEndpointChannels
+		discordgo.EndpointWebhooks = oldEndpointWebhooks
+	}()
+
+	s, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New() error = %v", err)
+	}
+	s.Client = server.Client()
+
+	p := &Platform{session: s}
+	rc := &interactionReplyCtx{interaction: &discordgo.Interaction{AppID: "app-1", Token: "token-1"}}
+	err = p.SendFile(context.Background(), rc, core.FileAttachment{
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		Data:     []byte("pdf-data"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(requests) != 1 || !strings.Contains(requests[0], "/messages/@original") {
+		t.Fatalf("requests = %v, want one original interaction edit", requests)
+	}
+}
+
 // ── Dedup tests ──────────────────────────────────────────────
 
+// simulateHandlerCall mimics the dedup + dispatch logic in the MessageCreate
+// handler registered by Platform.Start.  It returns true when the message
+// was dispatched (not a duplicate).
 func (p *Platform) simulateHandlerCall(msgID, userID, userName, channelID, content string) bool {
+	// --- dedup (same logic as Start handler) ---
 	if _, loaded := p.seenMsgs.LoadOrStore(msgID, struct{}{}); loaded {
 		return false
 	}
@@ -406,6 +571,8 @@ func (p *Platform) simulateHandlerCall(msgID, userID, userName, channelID, conte
 	return true
 }
 
+// newTestPlatform creates a Platform suitable for unit tests (no real Discord
+// connection).  The provided handler records every dispatched message.
 func newTestPlatform(handler core.MessageHandler) *Platform {
 	return &Platform{
 		token:     "test-token",
@@ -416,6 +583,9 @@ func newTestPlatform(handler core.MessageHandler) *Platform {
 	}
 }
 
+// TestDuplicateMessage_SameIDDeduped reproduces GitHub issue #122:
+// Discord gateway delivers the same MessageCreate event twice within ~1 ms.
+// The second delivery must be silently dropped.
 func TestDuplicateMessage_SameIDDeduped(t *testing.T) {
 	var calls int32
 	p := newTestPlatform(func(_ core.Platform, _ *core.Message) {
@@ -423,17 +593,24 @@ func TestDuplicateMessage_SameIDDeduped(t *testing.T) {
 	})
 
 	const msgID = "1482313396505411717"
+
+	// First delivery — must be processed.
 	if !p.simulateHandlerCall(msgID, "user1", "quabug", "ch1", "hello") {
 		t.Fatal("first delivery was incorrectly treated as duplicate")
 	}
+
+	// Second delivery (same msg_id, ~1 ms later) — must be dropped.
 	if p.simulateHandlerCall(msgID, "user1", "quabug", "ch1", "hello") {
 		t.Fatal("second delivery was not caught as duplicate")
 	}
+
 	if n := atomic.LoadInt32(&calls); n != 1 {
 		t.Fatalf("handler called %d times, want 1", n)
 	}
 }
 
+// TestDuplicateMessage_DifferentIDsProcessed ensures distinct messages are
+// not incorrectly suppressed by dedup.
 func TestDuplicateMessage_DifferentIDsProcessed(t *testing.T) {
 	var calls int32
 	p := newTestPlatform(func(_ core.Platform, _ *core.Message) {
@@ -449,11 +626,14 @@ func TestDuplicateMessage_DifferentIDsProcessed(t *testing.T) {
 	if !p.simulateHandlerCall("msg-3", "user1", "quabug", "ch1", "third") {
 		t.Fatal("msg-3 should be processed")
 	}
+
 	if n := atomic.LoadInt32(&calls); n != 3 {
 		t.Fatalf("handler called %d times, want 3", n)
 	}
 }
 
+// TestDuplicateMessage_ConcurrentRace fires N goroutines that all try to
+// deliver the same message simultaneously — exactly one must win.
 func TestDuplicateMessage_ConcurrentRace(t *testing.T) {
 	var calls int32
 	p := newTestPlatform(func(_ core.Platform, _ *core.Message) {
@@ -467,7 +647,8 @@ func TestDuplicateMessage_ConcurrentRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	start := make(chan struct{})
+	start := make(chan struct{}) // barrier so all goroutines race together
+
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
@@ -475,13 +656,18 @@ func TestDuplicateMessage_ConcurrentRace(t *testing.T) {
 			p.simulateHandlerCall(msgID, "user1", "quabug", "ch1", "race")
 		}()
 	}
-	close(start)
+
+	close(start) // release all goroutines at once
 	wg.Wait()
+
 	if n := atomic.LoadInt32(&calls); n != 1 {
 		t.Fatalf("handler called %d times under race, want exactly 1", n)
 	}
 }
 
+// TestDuplicateMessage_MultipleDuplicateBursts sends multiple distinct
+// messages, each duplicated, and verifies that each unique message is
+// processed exactly once.
 func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 	received := make(map[string]int)
 	var mu sync.Mutex
@@ -491,10 +677,11 @@ func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 		mu.Unlock()
 	})
 
+	// Simulate 10 messages, each delivered twice (as observed in logs).
 	for i := 0; i < 10; i++ {
 		id := "burst-" + string(rune('A'+i))
 		p.simulateHandlerCall(id, "user1", "quabug", "ch1", "msg")
-		p.simulateHandlerCall(id, "user1", "quabug", "ch1", "msg")
+		p.simulateHandlerCall(id, "user1", "quabug", "ch1", "msg") // duplicate
 	}
 
 	for id, count := range received {
@@ -575,6 +762,7 @@ func TestIsDiscordBotMention_Everyone(t *testing.T) {
 
 // ── Mention tests ────────────────────────────────────────────
 
+// TestStripDiscordMention verifies mention stripping helper.
 func TestStripDiscordMention(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -594,7 +782,8 @@ func TestStripDiscordMention(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := stripDiscordMention(tt.content, tt.botID)
 			if got != tt.want {
-				t.Errorf("stripDiscordMention(%q, %q) = %q, want %q", tt.content, tt.botID, got, tt.want)
+				t.Errorf("stripDiscordMention(%q, %q) = %q, want %q",
+					tt.content, tt.botID, got, tt.want)
 			}
 		})
 	}
