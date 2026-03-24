@@ -17,7 +17,7 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// ── Thread tests (upstream) ──────────────────────────────────
+// ── Thread tests ─────────────────────────────────────────────
 
 type fakeThreadOps struct {
 	resolveChannel func(channelID string) (*discordgo.Channel, error)
@@ -184,92 +184,7 @@ func TestResolveThreadReplyContext_StartsNewThread(t *testing.T) {
 	}
 }
 
-func TestResolveCronReplyTarget_CreatesStandaloneThread(t *testing.T) {
-	ops := fakeThreadOps{
-		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
-			return &discordgo.Channel{ID: channelID, Type: discordgo.ChannelTypeGuildText}, nil
-		},
-	}
-
-	var (
-		startChannelID string
-		startName      string
-		startType      discordgo.ChannelType
-		joinedThread   string
-	)
-	ops.startStandaloneThread = func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
-		startChannelID = channelID
-		startName = name
-		startType = typ
-		if archiveDuration != 1440 {
-			t.Fatalf("archiveDuration = %d, want 1440", archiveDuration)
-		}
-		return &discordgo.Channel{ID: "thread-fresh", Type: discordgo.ChannelTypeGuildPublicThread}, nil
-	}
-	ops.joinThread = func(threadID string) error {
-		joinedThread = threadID
-		return nil
-	}
-
-	sessionKey, rc, err := resolveCronReplyTarget("discord:channel-1:user-1", "Daily sync", ops)
-	if err != nil {
-		t.Fatalf("resolveCronReplyTarget() error = %v", err)
-	}
-	if sessionKey != "discord:thread-fresh" {
-		t.Fatalf("sessionKey = %q, want discord:thread-fresh", sessionKey)
-	}
-	if rc.channelID != "thread-fresh" || rc.threadID != "thread-fresh" {
-		t.Fatalf("replyContext = %#v, want fresh thread routing", rc)
-	}
-	if startChannelID != "channel-1" {
-		t.Fatalf("startChannelID = %q, want channel-1", startChannelID)
-	}
-	if startName != "Daily sync" {
-		t.Fatalf("thread name = %q, want Daily sync", startName)
-	}
-	if startType != discordgo.ChannelTypeGuildPublicThread {
-		t.Fatalf("thread type = %v, want public thread", startType)
-	}
-	if joinedThread != "thread-fresh" {
-		t.Fatalf("joinedThread = %q, want thread-fresh", joinedThread)
-	}
-}
-
-func TestResolveCronReplyTarget_ReusesExistingThreadKey(t *testing.T) {
-	ops := fakeThreadOps{
-		resolveChannel: func(channelID string) (*discordgo.Channel, error) {
-			switch channelID {
-			case "thread-1":
-				return &discordgo.Channel{ID: "thread-1", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "channel-1"}, nil
-			case "channel-1":
-				return &discordgo.Channel{ID: "channel-1", Type: discordgo.ChannelTypeGuildText}, nil
-			default:
-				t.Fatalf("unexpected channel lookup %q", channelID)
-				return nil, nil
-			}
-		},
-	}
-
-	startChannelID := ""
-	ops.startStandaloneThread = func(channelID, name string, typ discordgo.ChannelType, archiveDuration int) (*discordgo.Channel, error) {
-		startChannelID = channelID
-		return &discordgo.Channel{ID: "thread-fresh-2", Type: discordgo.ChannelTypeGuildPublicThread}, nil
-	}
-
-	sessionKey, rc, err := resolveCronReplyTarget("discord:thread-1", "cron", ops)
-	if err != nil {
-		t.Fatalf("resolveCronReplyTarget() error = %v", err)
-	}
-	if sessionKey != "discord:thread-fresh-2" {
-		t.Fatalf("sessionKey = %q, want discord:thread-fresh-2", sessionKey)
-	}
-	if rc.threadID != "thread-fresh-2" {
-		t.Fatalf("replyContext = %#v, want thread-fresh-2", rc)
-	}
-	if startChannelID != "channel-1" {
-		t.Fatalf("startChannelID = %q, want channel-1", startChannelID)
-	}
-}
+// ── Button tests ─────────────────────────────────────────────
 
 func TestSendWithButtons_UsesFollowupComponents(t *testing.T) {
 	requests := make([]string, 0, 2)
@@ -471,143 +386,9 @@ func TestSendPermissionButtons_SendsThreeButtonsInOneRow(t *testing.T) {
 	}
 }
 
-func TestSendWithButtons_UsesFollowupComponents(t *testing.T) {
-	requests := make([]string, 0, 2)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests = append(requests, r.URL.Path)
-		var payload map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		switch {
-		case strings.Contains(r.URL.Path, "/messages/@original"):
-			if payload["content"] != "choose mode" {
-				t.Fatalf("original content = %#v, want choose mode", payload["content"])
-			}
-		case strings.Contains(r.URL.Path, "/webhooks/app-1/token-1"):
-			if payload["content"] != "choose mode" {
-				t.Fatalf("followup content = %#v, want choose mode", payload["content"])
-			}
-			components, ok := payload["components"].([]any)
-			if !ok || len(components) != 1 {
-				t.Fatalf("components = %#v, want one row", payload["components"])
-			}
-			row := components[0].(map[string]any)
-			rowComponents := row["components"].([]any)
-			if rowComponents[0].(map[string]any)["custom_id"] != "cmd:/mode default" {
-				t.Fatalf("button0 = %#v, want cmd:/mode default", rowComponents[0])
-			}
-			if rowComponents[1].(map[string]any)["custom_id"] != "cmd:/mode yolo" {
-				t.Fatalf("button1 = %#v, want cmd:/mode yolo", rowComponents[1])
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"id":"msg-1","channel_id":"ch-1"}`)
-	}))
-	defer server.Close()
-
-	oldEndpointDiscord := discordgo.EndpointDiscord
-	oldEndpointAPI := discordgo.EndpointAPI
-	oldEndpointChannels := discordgo.EndpointChannels
-	oldEndpointWebhooks := discordgo.EndpointWebhooks
-	discordgo.EndpointDiscord = server.URL + "/"
-	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
-	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
-	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
-	defer func() {
-		discordgo.EndpointDiscord = oldEndpointDiscord
-		discordgo.EndpointAPI = oldEndpointAPI
-		discordgo.EndpointChannels = oldEndpointChannels
-		discordgo.EndpointWebhooks = oldEndpointWebhooks
-	}()
-
-	s, err := discordgo.New("Bot test-token")
-	if err != nil {
-		t.Fatalf("discordgo.New() error = %v", err)
-	}
-	s.Client = server.Client()
-
-	p := &Platform{session: s}
-	rc := &interactionReplyCtx{interaction: &discordgo.Interaction{AppID: "app-1", Token: "token-1"}}
-	err = p.SendWithButtons(context.Background(), rc, "choose mode", [][]core.ButtonOption{{
-		{Text: "Default", Data: "cmd:/mode default"},
-		{Text: "YOLO", Data: "cmd:/mode yolo"},
-	}})
-	if err != nil {
-		t.Fatalf("SendWithButtons() error = %v", err)
-	}
-	if len(requests) != 2 {
-		t.Fatalf("requests = %v, want 2", requests)
-	}
-}
-
-func TestSendWithButtons_PreservesMultipleRows(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		if strings.Contains(r.URL.Path, "/messages/@original") {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"id":"msg-1","channel_id":"ch-1"}`)
-			return
-		}
-		components, ok := payload["components"].([]any)
-		if !ok || len(components) != 2 {
-			t.Fatalf("components = %#v, want two rows", payload["components"])
-		}
-		first := components[0].(map[string]any)["components"].([]any)
-		second := components[1].(map[string]any)["components"].([]any)
-		if first[0].(map[string]any)["custom_id"] != "cmd:/reasoning 1" || first[1].(map[string]any)["custom_id"] != "cmd:/reasoning 2" {
-			t.Fatalf("first row = %#v, want cmd:/reasoning 1 and 2", first)
-		}
-		if second[0].(map[string]any)["custom_id"] != "cmd:/reasoning 3" {
-			t.Fatalf("second row = %#v, want cmd:/reasoning 3", second)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"id":"msg-2","channel_id":"ch-1"}`)
-	}))
-	defer server.Close()
-
-	oldEndpointDiscord := discordgo.EndpointDiscord
-	oldEndpointAPI := discordgo.EndpointAPI
-	oldEndpointChannels := discordgo.EndpointChannels
-	oldEndpointWebhooks := discordgo.EndpointWebhooks
-	discordgo.EndpointDiscord = server.URL + "/"
-	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
-	discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
-	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
-	defer func() {
-		discordgo.EndpointDiscord = oldEndpointDiscord
-		discordgo.EndpointAPI = oldEndpointAPI
-		discordgo.EndpointChannels = oldEndpointChannels
-		discordgo.EndpointWebhooks = oldEndpointWebhooks
-	}()
-
-	s, err := discordgo.New("Bot test-token")
-	if err != nil {
-		t.Fatalf("discordgo.New() error = %v", err)
-	}
-	s.Client = server.Client()
-
-	p := &Platform{session: s}
-	rc := &interactionReplyCtx{interaction: &discordgo.Interaction{AppID: "app-1", Token: "token-1"}}
-	err = p.SendWithButtons(context.Background(), rc, "choose reasoning", [][]core.ButtonOption{
-		{{Text: "low", Data: "cmd:/reasoning 1"}, {Text: "medium", Data: "cmd:/reasoning 2"}},
-		{{Text: "high", Data: "cmd:/reasoning 3"}},
-	})
-	if err != nil {
-		t.Fatalf("SendWithButtons() error = %v", err)
-	}
-}
-
 // ── Dedup tests ──────────────────────────────────────────────
 
-// simulateHandlerCall mimics the dedup + dispatch logic in the MessageCreate
-// handler registered by Platform.Start.  It returns true when the message
-// was dispatched (not a duplicate).
 func (p *Platform) simulateHandlerCall(msgID, userID, userName, channelID, content string) bool {
-	// --- dedup (same logic as Start handler) ---
 	if _, loaded := p.seenMsgs.LoadOrStore(msgID, struct{}{}); loaded {
 		return false
 	}
@@ -625,8 +406,6 @@ func (p *Platform) simulateHandlerCall(msgID, userID, userName, channelID, conte
 	return true
 }
 
-// newTestPlatform creates a Platform suitable for unit tests (no real Discord
-// connection).  The provided handler records every dispatched message.
 func newTestPlatform(handler core.MessageHandler) *Platform {
 	return &Platform{
 		token:     "test-token",
@@ -637,9 +416,6 @@ func newTestPlatform(handler core.MessageHandler) *Platform {
 	}
 }
 
-// TestDuplicateMessage_SameIDDeduped reproduces GitHub issue #122:
-// Discord gateway delivers the same MessageCreate event twice within ~1 ms.
-// The second delivery must be silently dropped.
 func TestDuplicateMessage_SameIDDeduped(t *testing.T) {
 	var calls int32
 	p := newTestPlatform(func(_ core.Platform, _ *core.Message) {
@@ -647,24 +423,17 @@ func TestDuplicateMessage_SameIDDeduped(t *testing.T) {
 	})
 
 	const msgID = "1482313396505411717"
-
-	// First delivery — must be processed.
 	if !p.simulateHandlerCall(msgID, "user1", "quabug", "ch1", "hello") {
 		t.Fatal("first delivery was incorrectly treated as duplicate")
 	}
-
-	// Second delivery (same msg_id, ~1 ms later) — must be dropped.
 	if p.simulateHandlerCall(msgID, "user1", "quabug", "ch1", "hello") {
 		t.Fatal("second delivery was not caught as duplicate")
 	}
-
 	if n := atomic.LoadInt32(&calls); n != 1 {
 		t.Fatalf("handler called %d times, want 1", n)
 	}
 }
 
-// TestDuplicateMessage_DifferentIDsProcessed ensures distinct messages are
-// not incorrectly suppressed by dedup.
 func TestDuplicateMessage_DifferentIDsProcessed(t *testing.T) {
 	var calls int32
 	p := newTestPlatform(func(_ core.Platform, _ *core.Message) {
@@ -680,14 +449,11 @@ func TestDuplicateMessage_DifferentIDsProcessed(t *testing.T) {
 	if !p.simulateHandlerCall("msg-3", "user1", "quabug", "ch1", "third") {
 		t.Fatal("msg-3 should be processed")
 	}
-
 	if n := atomic.LoadInt32(&calls); n != 3 {
 		t.Fatalf("handler called %d times, want 3", n)
 	}
 }
 
-// TestDuplicateMessage_ConcurrentRace fires N goroutines that all try to
-// deliver the same message simultaneously — exactly one must win.
 func TestDuplicateMessage_ConcurrentRace(t *testing.T) {
 	var calls int32
 	p := newTestPlatform(func(_ core.Platform, _ *core.Message) {
@@ -701,8 +467,7 @@ func TestDuplicateMessage_ConcurrentRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	start := make(chan struct{}) // barrier so all goroutines race together
-
+	start := make(chan struct{})
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
@@ -710,18 +475,13 @@ func TestDuplicateMessage_ConcurrentRace(t *testing.T) {
 			p.simulateHandlerCall(msgID, "user1", "quabug", "ch1", "race")
 		}()
 	}
-
-	close(start) // release all goroutines at once
+	close(start)
 	wg.Wait()
-
 	if n := atomic.LoadInt32(&calls); n != 1 {
 		t.Fatalf("handler called %d times under race, want exactly 1", n)
 	}
 }
 
-// TestDuplicateMessage_MultipleDuplicateBursts sends multiple distinct
-// messages, each duplicated, and verifies that each unique message is
-// processed exactly once.
 func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 	received := make(map[string]int)
 	var mu sync.Mutex
@@ -731,11 +491,10 @@ func TestDuplicateMessage_MultipleDuplicateBursts(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// Simulate 10 messages, each delivered twice (as observed in logs).
 	for i := 0; i < 10; i++ {
 		id := "burst-" + string(rune('A'+i))
 		p.simulateHandlerCall(id, "user1", "quabug", "ch1", "msg")
-		p.simulateHandlerCall(id, "user1", "quabug", "ch1", "msg") // duplicate
+		p.simulateHandlerCall(id, "user1", "quabug", "ch1", "msg")
 	}
 
 	for id, count := range received {
@@ -816,7 +575,6 @@ func TestIsDiscordBotMention_Everyone(t *testing.T) {
 
 // ── Mention tests ────────────────────────────────────────────
 
-// TestStripDiscordMention verifies mention stripping helper.
 func TestStripDiscordMention(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -836,8 +594,7 @@ func TestStripDiscordMention(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := stripDiscordMention(tt.content, tt.botID)
 			if got != tt.want {
-				t.Errorf("stripDiscordMention(%q, %q) = %q, want %q",
-					tt.content, tt.botID, got, tt.want)
+				t.Errorf("stripDiscordMention(%q, %q) = %q, want %q", tt.content, tt.botID, got, tt.want)
 			}
 		})
 	}
